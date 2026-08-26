@@ -230,6 +230,42 @@ job.arcPos   = 该点在走道中线上的投影     ← 只用来算 job.arc，
 `__packProbe()` 盖章/打包/码垛/拖运状态机快照
 `__forcePallet(n)` 跳到「差 n 箱满垛」，验证拖运不用等 270s 仿真时间
 `__boundsProbe()` 所有 mesh 是否落在四面墙内
+`__deadlockProbe(s)` 采样 s 秒，断言两车不会同时 eff=0，结果读 `window.__deadlockResult`
+`__forceMeet(gap)` 强制两车在南段直线上贴近相遇
+`__forceCorner(s)` 强制两车摆到拐角两侧（弧长差小但物理很近，最容易死锁的位置）
+
+## PA1 防撞：所有判据必须非对称（死锁根因，务必读完）
+
+**症状**：两台 AMR 相遇后一起停住，再也不动。
+**根因**：判据里写了 `physDist < 1.5` 且**对两车同时生效**。物理距离是对称量，
+两车算出同一个值，于是同时 `eff=0`；停下后距离不再变化，永久对停。
+
+**正确结构**：
+
+1. 主判据只用**环序弧长** `arcDist(other.arc, self.arc)`。它天然非对称：
+   `gapArc(A在B后) + gapArc(B在A后) === LOOP_LEN(62.4m)`，
+   两者不可能同时小于阈值，所以永远只有后车让行，前车照常走，间距必然重新拉开。
+2. 物理距离**只能作为后车的兜底刹车**，用 `isFollower(amr, other)`
+   （即 `arcDist(other.arc, amr.arc) < LOOP_LEN/2`）把它变成非对称的。
+3. 阈值由拐角几何推导，不要凭感觉调：矩形环线最坏情况在直角拐角，
+   两车跨拐角、弧长差 s 时物理间距最小为 `s/sqrt(2)`。车身对角约 1.47m，
+   要保证 >= 2.0m 则 `s >= 2.0*sqrt(2) = 2.83`，故 `AMR_STOP_GAP = 2.9`。
+   当前：`AMR_STOP_GAP=2.9, AMR_SAFE_GAP=5.2, AMR_BODY_CLEAR=1.7`。
+4. `occupiesLoop(other)` 决定对方是否还占环线槽位：`traveling/idle` 占；
+   `approaching/departing` 若离环线中线 < `AMR_NEAR_LOOP(1.2)` 仍算占；
+   `docking/charging` 已完全离环，不占（否则前车装卸时后车永久等待）。
+5. **空闲车必须会让路**：`idle` 的车停在单向环线上会挡死后车（后车按弧长排队，
+   而它永远不动）。所以 idle 分支里若后方有车在 `AMR_SAFE_GAP` 内接近，
+   就以 0.55 倍速顺车流缓行。
+
+**绝对不要**：加对称的物理距离硬停；加「阻塞 N 秒就低速脱困」的兜底
+（会让车撞进正在装卸的前车）。环序恒定 + 判据非对称，结构上就不会死锁。
+
+**验证方式**（改动防撞逻辑后必跑）：
+`__forceMeet` / `__forceCorner` 造相遇，再 `__deadlockProbe(30)`，
+要求 `bothStoppedSamples: 0` 且 `bothMoved: [true,true]`。
+已实测：八次强制相遇（含 1.27m 极端拐角贴近）全部自行脱开，
+前车 eff 恒为 3.4 不受影响，后车从 0.5 平滑加速回 3.4，稳态最小间距 3.8m。
 
 ## PA1 场地尺寸单一来源
 

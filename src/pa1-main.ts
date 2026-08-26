@@ -824,8 +824,39 @@ const amr1 = makeAMR('AMR-01 送检', 'sample', 3.4, 2, 0);
 const amr2 = makeAMR('AMR-02 成品', 'product', 3.4, 26, 1);
 const fleet = [amr1, amr2];
 
-const AMR_STOP_GAP = 2.0;
-const AMR_SAFE_GAP = 3.8;
+// ===== 防撞参数（几何推导，勿凭感觉调）=====
+// 车身 1.15(长) x 0.92(宽)。判据只用「环序弧长」，因为它天然非对称：
+// 两车的 gapArc 之和恒等于 LOOP_LEN(62.4m)，不可能同时小于阈值，所以永远只有
+// 后车让行 —— 结构上不存在双向对停的死锁。
+//
+// 阈值怎么来的：环线是矩形，最坏情况在直角拐角。两车跨拐角、弧长差 s 时，
+// 物理间距最小为 s/sqrt(2)（前后各占 s/2 时取到）。车身对角约 1.47m，
+// 要留出余量保证 >= 2.0m，需要 s >= 2.0*sqrt(2) = 2.83，故取 2.9。
+const AMR_STOP_GAP = 2.9;        // 硬停：拐角最坏物理间距 2.9/1.414 = 2.05m
+const AMR_SAFE_GAP = 5.2;        // 开始减速
+const AMR_BODY_CLEAR = 1.7;      // 兜底刹车的物理间距阈值（仅后车用，见下）
+// 离环车辆仍然「占位」的判定距离：靠站/离站途中若离环线中线还不到这个距离，
+// 它的 arc 槽位继续算被占用，后车按弧长在它后面排队。
+// 这一步也是非对称的（仍走环序），不会引入死锁。
+const AMR_NEAR_LOOP = 1.2;
+
+// 对方是否占用环线上的 arc 槽位
+function occupiesLoop(other) {
+  if (other.state === 'traveling' || other.state === 'idle') return true;
+  // 靠站/离站途中还贴着走道的，视为仍占位；已经深入货位/泊位的不占走道
+  if (other.state === 'approaching' || other.state === 'departing') {
+    const onLoop = posOnLoop(other.arc).pos;
+    return other.mesh.position.distanceTo(onLoop) < AMR_NEAR_LOOP;
+  }
+  return false;   // docking / charging：已完全离环
+}
+
+// 本车是否是「后车」（环序意义上跟在对方后面）。
+// 用它把兜底刹车也变成非对称的：只有后车会因为物理距离刹车，前车照常走，
+// 于是间距一定会重新拉开。对称刹车 = 两车一起停死，这是之前的 bug 根因。
+function isFollower(amr, otherAmr) {
+  return arcDist(otherAmr.arc, amr.arc) < LOOP_LEN / 2;
+}
 
 // 车头朝向平滑插值（避免靠站/离站瞬间 90 度跳变）
 function smoothYaw(amr, targetYaw, dt) {
@@ -1013,7 +1044,16 @@ function updateAMROnLoop(amr, otherAmr, dt) {
     if (led) led.material.emissiveIntensity = 0.35 + Math.sin(performance.now() * 0.002) * 0.15;
     amr.idleTimer += dt;
     dispatchAMR(amr);
-    // 停在环线上不动
+    // 空闲车停在单向环线上会挡住后车（后车按弧长在它后面排队，而它永远不动）。
+    // 所以只要后面有车靠近，就顺着车流缓行让路，而不是钉在原地。
+    if (amr.state === 'idle') {
+      const behindGap = arcDist(amr.arc, otherAmr.arc);   // 对方在本车「后方」的弧长
+      const otherMoving = otherAmr.state === 'traveling';
+      if (otherMoving && behindGap < AMR_SAFE_GAP) {
+        amr.arc += amr.speed * 0.55 * dt;
+        if (amr.arc >= LOOP_LEN) amr.arc -= LOOP_LEN;
+      }
+    }
     const { pos, dir } = posOnLoop(amr.arc);
     amr.mesh.position.copy(pos);
     amr.mesh.rotation.y = Math.atan2(dir.x, dir.z);
@@ -1029,17 +1069,23 @@ function updateAMROnLoop(amr, otherAmr, dt) {
     const target = amr.job.arc;
     const toTarget = arcDist(target, amr.arc);
 
-    // 防撞：环序弧长 + 实际世界距离双判据。
-    // 单纯用弧长在对方离环停靠时会失效，故追加物理距离兜底。
-    // 关键：对方已经离环（靠站/装卸/充电）时不占用走道，不能再用弧长把本车停死，
-    // 否则会出现「前车在泊位充电，后车在环线上永久等待」的死锁。
-    const otherOnLoop = otherAmr.state === 'traveling' || otherAmr.state === 'idle';
+    // ===== 防撞：判据必须全部非对称，否则两车一起停 =====
+    // 主判据是环序弧长。它天然非对称：gapArc(A后B) + gapArc(B后A) === LOOP_LEN，
+    // 两者不可能同时小于阈值，所以永远只有后车让行，前车照常走，间距必然重新拉开。
+    //
+    // 物理距离只能作为「后车」的兜底刹车（isFollower 判定），绝不能双向生效。
+    // 之前写成 `physDist < 1.5` 对两车同时判定，一旦在拐角触发就双向硬停，
+    // 距离再也不会变化 —— 这就是「AMR 相遇后一起死在原地」的根因。
+    const otherOnLoop = occupiesLoop(otherAmr);
     const gapArc = otherOnLoop ? arcDist(otherAmr.arc, amr.arc) : Infinity;
     const physDist = amr.mesh.position.distanceTo(otherAmr.mesh.position);
+    const follower = isFollower(amr, otherAmr);
     let eff = amr.speed;
-    if (gapArc < AMR_STOP_GAP || physDist < 1.5) eff = 0;
+    if (gapArc < AMR_STOP_GAP) eff = 0;
     else if (gapArc < AMR_SAFE_GAP) eff = amr.speed * (gapArc - AMR_STOP_GAP) / (AMR_SAFE_GAP - AMR_STOP_GAP);
-    else if (physDist < 2.6) eff = amr.speed * 0.45;
+    // 兜底：只有后车因物理贴近而刹车。对方在货位装卸时不参与（它不在走道上）。
+    if (follower && otherOnLoop && physDist < AMR_BODY_CLEAR) eff = 0;
+    else if (follower && otherOnLoop && physDist < 2.4) eff = Math.min(eff, amr.speed * 0.45);
 
     if (toTarget < 1.5 && eff > 0) eff = Math.min(eff, toTarget * 1.6 + 0.12);
     // 调试用（供 __flowProbe 读取，交付前可移除）
@@ -2296,6 +2342,69 @@ window.__amrGap = () => {
   const d = amr1.mesh.position.distanceTo(amr2.mesh.position);
   console.log('physical gap =', d.toFixed(2), 'm', d < 1.1 ? '!! TOO CLOSE' : 'OK');
   return d;
+};
+
+// 死锁看门狗：核心断言是「两车不会同时 eff=0」。
+// 环序弧长判据非对称（gapArc 之和恒为 LOOP_LEN），加上兜底刹车只对后车生效，
+// 所以结构上不该出现双向对停。这个探针用来量化证明它。
+window.__deadlockProbe = (seconds = 30) => {
+  const t0 = performance.now();
+  let bothStopped = 0, samples = 0, minGap = 99, maxBothStreak = 0, streak = 0;
+  const arcStart = [amr1.arc, amr2.arc];
+  const timer = setInterval(() => {
+    samples++;
+    const g = amr1.mesh.position.distanceTo(amr2.mesh.position);
+    if (g < minGap) minGap = g;
+    // 只在两车都在环上行驶时才算「对停」，装卸/充电时停是正常的
+    const bothTraveling = amr1.state === 'traveling' && amr2.state === 'traveling';
+    const e1 = amr1.debugEff ?? 1, e2 = amr2.debugEff ?? 1;
+    if (bothTraveling && e1 === 0 && e2 === 0) {
+      bothStopped++; streak++;
+      if (streak > maxBothStreak) maxBothStreak = streak;
+    } else streak = 0;
+    if (performance.now() - t0 > seconds * 1000) {
+      clearInterval(timer);
+      const moved = [
+        Math.abs(amr1.arc - arcStart[0]) > 0.5 || amr1.deliveries > 0,
+        Math.abs(amr2.arc - arcStart[1]) > 0.5 || amr2.deliveries > 0,
+      ];
+      const r = {
+        samples, bothStoppedSamples: bothStopped,
+        maxBothStoppedStreakMs: maxBothStreak * 120,
+        minPhysGap: +minGap.toFixed(2),
+        bothMoved: moved,
+        verdict: (bothStopped === 0 && minGap > 1.1) ? 'OK: no mutual standstill' : '!! possible deadlock',
+      };
+      console.log(r);
+      window.__deadlockResult = r;
+    }
+  }, 120);
+  return 'sampling ' + seconds + 's, read window.__deadlockResult';
+};
+
+// 强制把两车摆到同一段走道上贴近，主动制造相遇，检验能否自行脱开。
+// 这是复现「相遇即死」最快的手段，不用等随机撞上。
+window.__forceMeet = (gap = 1.6) => {
+  amr1.state = 'traveling'; amr2.state = 'traveling';
+  // 放在南段直线中部，两车同向、相距 gap
+  amr1.arc = 26;
+  amr2.arc = ((26 - gap) + LOOP_LEN) % LOOP_LEN;
+  if (!amr1.job) { amr1.job = { kind: 'charge', dockPos: chargeBays[0].clone(), arcPos: chargeStops[0].clone(), arc: arcOfPoint(chargeStops[0]) }; }
+  if (!amr2.job) { amr2.job = { kind: 'charge', dockPos: chargeBays[1].clone(), arcPos: chargeStops[1].clone(), arc: arcOfPoint(chargeStops[1]) }; }
+  return { amr1Arc: amr1.arc, amr2Arc: amr2.arc, gapArc: arcDist(amr1.arc, amr2.arc) };
+};
+
+// 把两车摆到同一个拐角两侧（弧长差小但物理很近），这是旧判据最容易死锁的位置
+window.__forceCorner = (s = 2.2) => {
+  amr1.state = 'traveling'; amr2.state = 'traveling';
+  const cornerArc = 31.2;   // 东南拐点附近
+  amr1.arc = (cornerArc + s / 2) % LOOP_LEN;
+  amr2.arc = ((cornerArc - s / 2) + LOOP_LEN) % LOOP_LEN;
+  return {
+    amr1Arc: +amr1.arc.toFixed(2), amr2Arc: +amr2.arc.toFixed(2),
+    gapArc: +arcDist(amr1.arc, amr2.arc).toFixed(2),
+    physGap: +posOnLoop(amr1.arc).pos.distanceTo(posOnLoop(amr2.arc).pos).toFixed(2),
+  };
 };
 
 // 顶部 QC 条排版自检：不等 AMR 跑圈，直接灌记录看宽度/换行/溢出

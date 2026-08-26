@@ -12,18 +12,26 @@
 
 ```
 .
-├── index.html           # 入口 HTML，引用 /src/main.ts
-├── package.json         # scripts: dev / build / preview
+├── index.html           # 入口 HTML，当前引用 /src/pa1-main.ts（PA1 分支）
+├── package.json         # scripts: dev / build / preview / verify*
 ├── vite.config.ts       # Vite 配置（host + es2020 目标）
 ├── tsconfig.json        # TS 配置
 ├── esa.jsonc            # ESA Pages 配置（assets.directory = dist，SPA 回退）
 ├── deploy-oss.ps1       # 备选：阿里云 OSS 一键上传脚本
+├── tools/
+│   └── verify.cjs       # 无头 Chrome + CDP 自动验证器（改完必跑，见「验证 SOP」）
 ├── src/
-│   ├── main.ts          # 全部场景代码
-│   └── style.css        # 全部样式
+│   ├── main.ts          # 旧的 U 型线场景（另一套项目，勿动）
+│   ├── style.css        # U 型线样式
+│   ├── pa1-main.ts      # PA1 打包区场景全部代码（当前主线）
+│   ├── pa1-style.css    # PA1 样式
+│   └── pa1-main.backup.ts  # PA1 改动前的原始备份
 ├── public/              # 静态资源原样输出（目前空）
 └── .gitignore
 ```
+
+**两套场景并存**：`src/main.ts` 是早期 U 型线项目，`src/pa1-main.ts` 是当前 PA1 打包区分支。
+两者常量体系互不相干，改 PA1 时不要参照 U 型线的数值（详见文末 PA1 章节）。
 
 ## 本地开发
 
@@ -33,6 +41,56 @@ npm run dev      # http://localhost:5173
 npm run build    # 输出 dist/
 npm run preview  # 预览构建产物
 ```
+
+## 验证 SOP（改完必跑，不要口头交付）
+
+**血泪教训**：有好几轮我改完代码只告诉用户「已完成」，但实际渲染是坏的 / 需求没落地，
+用户反复反馈「没变化」「没渲染」。根因是**我没有能力自己看到画面**，只能靠用户当测试员。
+现在这条通路已经打通并固化成脚本，**任何场景改动后必须自己先验证再交付**。
+
+### 固定流程（4 步，别跳）
+
+```bash
+# 1. 语法快检（秒级，esbuild 只做 transform，不碰文件系统）
+node -e "const e=require('esbuild'),f=require('fs');e.transform(f.readFileSync('src/pa1-main.ts','utf8'),{loader:'ts'}).then(()=>console.log('PARSE OK')).catch(x=>x.errors.forEach(y=>console.log(y.location.line+': '+y.text)))"
+
+# 2. 构建（注意下面 vite.config.ts 改名的坑）
+Rename-Item vite.config.ts vite.config.ts.hold
+npx vite build --base=./
+Rename-Item vite.config.ts.hold vite.config.ts
+
+# 3. 自动验证（无头 Chrome 真跑，看渲染 + 动画 + 逻辑）
+npm run verify              # 60s 快检
+npm run verify:long         # 180s，看完整物流循环（一个 AMR 循环约 50s 仿真时间）
+npm run verify:trace        # 卡死时用：每 2s 打一行 state/job/arc/tgt/eff
+
+# 4. PASS 之后才把 dist/index.html 交给用户
+```
+
+`tools/verify.cjs` 自动断言：canvas 尺寸、像素多样性（防黑屏）、机台与货架同侧、
+停靠点偏离环线、两车全程最小间距、运行时异常，最后给 `RESULT: PASS/FAIL` 并存截图。
+
+### 为什么必须用这个脚本（环境硬约束）
+
+- **dev server 起得来但连不上**：跨进程访问 `127.0.0.1` 直接 ECONNREFUSED / 502。
+  不要再浪费时间尝试「起 server 然后 curl / Invoke-WebRequest」。
+- **同进程内 listen + 请求是通的**。所以正确姿势是：一个 node 脚本里 `spawn` 无头 Chrome，
+  再连它的 CDP WebSocket（node 22 自带全局 `WebSocket`）。`tools/verify.cjs` 就是这个。
+- 机器上**没有 Playwright / Puppeteer**，装不上就别等了，直接用 CDP。
+- 无头必须加 `--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader`，
+  否则 WebGL 拿不到 context，截图必然空白。
+- `file://` 打开要加 `--allow-file-access-from-files`；中文路径里的空格要转 `%20`。
+- **无头只有 4~6 FPS**（软件渲染），而 `animate()` 里 `dt` 被 clamp 到 0.05，
+  所以仿真时间比墙上时间慢约 3 倍。**动画看着慢 ≠ 代码有 bug**，先跑 `npm run verify:fps` 确认。
+
+### 调试方法论（这轮真正花时间的地方）
+
+1. **先建观测能力，再改代码**。缺观测时的「改完即宣称完成」是最大的时间浪费来源。
+2. **bug 会层层遮蔽**：充电死锁挡住了派单问题，派单问题挡住了停靠点全在走道中线的问题，
+   修完才暴露 INPUT/OUTPUT 顺序逆向 + 工人节拍超运力 5 倍。**一次只修一层，每层重新长观察**。
+3. **不要靠读代码猜卡死原因**，直接在页面里 `setInterval` 采样 `state/job/arc/tgt/eff/gapArc`
+   打成时间序列（即 `--trace`）。这轮所有硬 bug 都是这样一眼看出来的。
+4. **判据要能区分「在环」和「离环」**：任何"车停住了"的现象，先看 `eff` 是被谁按到 0 的。
 
 ## 关键不变量（改几何前必读）
 
@@ -78,6 +136,96 @@ U_LEFT_X=-5.05, U_RIGHT_X=5.05`，皮带环线约 41.88m。
 
 `__amrProbe __uSeam __uContinuity(n) __beltProbe __fleetProbe __fleetDebug
 __overlapProbe __transferProbe __pathOverlap __setFleet(specs) __arcToPoint(arc)`
+
+---
+
+# PA1 打包区分支（src/pa1-main.ts）
+
+**注意：上面 U 型线的常量与本节无关，两套场景各自独立，不要混用。**
+`index.html` 当前入口是 `/src/pa1-main.ts`。原始版本备份在 `src/pa1-main.backup.ts`。
+
+## PA1 布局：四叶草 + 单向环线
+
+4 个生产区以四叶草围绕中央滚筒打包区，外圈一条矩形单向环线（逆时针，约 62m）。
+全部坐标从常量推导，不要硬编码：
+
+```
+ZONE_DIST=12.5  ZONE_W=7.2  ZONE_D=6.4
+DOCK_LOCAL_Z=2.4  DOCK_HALF=0.75
+AISLE_W=2.4  AISLE_RADIUS=7.8
+SHELF_CLEAR=0.34  SHELF_DECK_Y=0.42  SHELF_TOP_Y=0.92
+```
+
+**同侧不变量**（用户明确要求：机器和货架必须在走道同一边）：
+`AISLE_RADIUS + AISLE_W/2 <= ZONE_DIST - DOCK_LOCAL_Z - DOCK_HALF`
+当前走道外沿 9.00 / 货架内沿 9.35 / 机台内沿 13.40。改任一常量后跑 `__sideCheck()` 必须全 true。
+
+生产区朝向公式 `atan2(cfg.x, cfg.z) + PI` 是对的（本地 +Z 朝厂房中心），别再"修正"它。
+
+## PA1 三个已修死锁（回归风险最高，勿退回）
+
+1. **充电位必须离环、且每车专属**。
+   曾经两车共用一个充电位、且该位正好落在环线上 → 前车充电，后车在环线永久硬停，
+   66 秒 0 次配送。现在 `chargeStops[bay]`（环线投影）+ `chargeBays[bay]`（离环泊位），
+   `amr.bay` 一车一个。
+2. **去充电的行程必须可抢占**。
+   派单原来只在 `state==='idle'` 时轮询，车一旦上路去充电就再也不看呼叫，
+   PDA 呼叫全被无视。现在 `traveling` 分支里若 `job.kind` 是 `charge/charge_done`
+   会继续调用 `dispatchAMR`。**不要把 dispatchAMR 收回只在 idle 调用。**
+3. **防撞判据必须区分「在环 / 离环」**。
+   `gapArc` 只在对方 `state` 为 `traveling|idle` 时计算，否则取 `Infinity`。
+   否则对方在泊位充电/装卸（已让出走道）仍会把本车按停。
+
+## PA1 停靠语义：dockPos 是货位，arcPos 才是走道点
+
+这是"AMR 要停在正确的靠近位置、潜伏顶起货架"能否成立的关键。曾经两者都取走道中线投影，
+于是 `approaching` 从环线点插值到同一个点 → 顶升动画在原地播，车根本没进货位。
+
+```
+job.dockPos  = 货架/接口台真实世界坐标   ← 车最终停这里（潜入架下）
+job.arcPos   = 该点在走道中线上的投影     ← 只用来算 job.arc，保证行驶段在走道内
+```
+
+`approaching`/`departing` 是环线点与 dockPos 之间的垂直插值，配合 `smoothYaw()` 转车头。
+`__stopCheck()` 里所有 `offsetFromLoop` 必须为 0（校验 arcPos 落在环线上）。
+
+## PA1 INPUT/OUTPUT 必须顺着车流方向排
+
+单向环线，所以 **INPUT 在上游、OUTPUT 在下游**，AMR 一次靠站就能卸满架 + 顶空架走。
+排反了会导致取空架要绕一整圈 62m（实测单趟从 50s 涨到 130s+）。
+
+- 西段沿 -Z 行驶：`qcInputSlot.z=-5.2`（上游）> `qcOutputSlot.z=-7.2`（下游）
+- 北段沿 -X 行驶：`packInputSlot.x=1.3`（上游）> `packOutputSlot.x=-1.3`（下游）
+
+## PA1 节拍必须与运力匹配
+
+2 台 AMR 单趟约 50s 仿真时间（含靠站装卸），4 个区共 8 个货位。
+工人上货节拍 `w.timer = 20 + random*12`（秒）就是按这个反算的。
+改快（曾经 3-6s）会让料箱在缓存区无限堆积，看板 WIP 一路涨、`del` 却上不去。
+调节拍或车速后，用 `npm run verify:long` 看 `bins` 是否稳定、`del/qc/pack` 是否持续增长。
+
+## PA1 货架流转闭环
+
+每区 1 红（送样→QC）+ 1 绿（成品→打包），QC 和打包区各 1 个初始空架，
+且**必须 push 进 `sampleShelfAtZone`/`productShelfAtZone`**，否则调度器看不见、货架池越用越少。
+
+调度优先级（顺序不能换）：
+1. `pickup_empty` 回收站内空架送回缺架产线区 —— 排第一，否则空架全堆在站内、产线停摆
+2. `pickup` 响应 PDA 呼叫取满架
+3. `charge` 回自己泊位待命
+
+空架用 `reservedBy` 防两车抢同一货位。料箱由站内工人在 `updateShelves` 中**逐个取走**
+（每 0.8s 一箱，可见消失），不是瞬间蒸发；取空后挪到 OUTPUT 位 `atOutput=true` 等回收。
+
+## PA1 调试探针
+
+`__sideCheck()` 四区机台/红架/绿架半径与同侧判定
+`__stopCheck()` 所有停靠点弧长与偏离环线距离（须全 0）
+`__flowProbe()` 货架分布、料箱数、呼叫数、已检/已收、两车 state/job/arc/tgt/eff/gapArc/phys
+`__amrGap()` 两车实际物理间距（< 1.1 报警）
+
+`__flowProbe()` 里的 `debugEff/debugGapArc/debugPhys` 是定位"车为什么停住"的主要手段，
+交付前可移除，但**调试期别删**。
 
 ## 部署：ESA Pages
 

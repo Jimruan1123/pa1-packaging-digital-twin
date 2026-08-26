@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "verify": "node tools/verify.cjs",
+    "verify:long": "node tools/verify.cjs --seconds 180",
+    "verify:trace": "node tools/verify.cjs --seconds 150 --trace",
+    "verify:fps": "node tools/verify.cjs --fps"
   },
   "dependencies": {
     "three": "^0.160.0"

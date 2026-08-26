@@ -313,4 +313,37 @@ Pages 项目构建成功 ≠ 能绑自定义域名。绑域名需要账号下先
 
 ## 远程仓库
 
+两个仓库对应两套场景，**别推错**：
+
+| 场景 | 仓库 | 分支 |
+|---|---|---|
+| PA1 打包区（当前主线，`src/pa1-main.ts`） | `Jimruan1123/pa1-packaging-digital-twin` | `main` |
+| 早期 U 型线（`src/main.ts`） | `Jimruan1123/amr-packaging-line-digital-twin` | `master` |
+
+### 推送方式：tools/gh-push.cjs
+
+公司电脑 `git` 命令行出站被拦（schannel `SEC_E_NO_CREDENTIALS`、`.git` 目录可能没写权限），
+所以走 Clash Verge 的 HTTP CONNECT 隧道 + GitHub REST API。详细原理见 `DEPLOYMENT-GITHUB-UPLOAD.md`。
+
+```powershell
+$env:NODE_TLS_REJECT_UNAUTHORIZED="0"        # 绕过 Clash 自签证书
+$env:GITHUB_TOKEN="github_pat_..."           # fine-grained，Contents 必须 Read and write
+$env:COMMIT_MESSAGE=@"
+多行提交说明写这里
+"@
+node tools/gh-push.cjs --repo Jimruan1123/pa1-packaging-digital-twin --branch main
+```
+
+**推送前务必 `--dry` 看一遍文件清单**，确认没有把临时脚本、备份、`dist/` 带上去。
+
+### 这个脚本修掉的两个坑（勿退回旧 gh_push.cjs）
+
+1. **旧脚本建 commit 不带 `parents`**，每次推送都把提交历史冲成孤立 commit。
+   现在会先 `GET /git/ref/heads/{branch}` 取当前 HEAD 当 parent。
+2. **多行提交说明不能用 `-m` 传**：PowerShell 下换行会截断参数解析，脚本会报「缺提交说明」。
+   用 `$env:COMMIT_MESSAGE` here-string 传。
+
+其他注意：Clash Verge 默认端口 `7897`（可用 `PROXY_PORT` 覆盖）；
+`dist/` 永远不上传，Cloudflare Pages 会云端 `npm run build`（见部署章节的红线）。
+
 https://github.com/Jimruan1123/amr-packaging-line-digital-twin

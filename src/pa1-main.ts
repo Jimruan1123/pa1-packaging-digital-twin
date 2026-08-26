@@ -1676,8 +1676,9 @@ addWalkway(5.5, 0, 1.2, 8);
 addWalkway(0, -5.2, 8, 1.2);
 addWalkway(0, 5.2, 8, 1.2);
 
-// --- 中央目视化看板（悬挂大屏，QC 巡检判定实时数据） ---
-// 用 CSS2DObject 承载真实文字，而不是靠色块假装数据。
+// --- 中央目视化看板（车间实体悬挂屏） ---
+// 数据已挪到页面顶部的 QC 巡检条（.qc-strip），这里只保留厂房里的实体结构，
+// 避免 3D 里再叠一块 290px 的 CSS2D 面板挡住视口。
 const qcBoardGroup = new THREE.Group();
 {
   const boardFrame = box(4.6, 2.6, 0.12, 0x2a2a2a, { metal: 0.6, rough: 0.4 });
@@ -1686,29 +1687,12 @@ const qcBoardGroup = new THREE.Group();
   h1.position.set(-1.8, 7.6, 0); qcBoardGroup.add(h1);
   const h2 = box(0.05, 1.2, 0.05, 0x555);
   h2.position.set(1.8, 7.6, 0); qcBoardGroup.add(h2);
-
-  const panel = document.createElement('div');
-  panel.style.cssText = [
-    'width:290px', 'background:rgba(12,22,36,0.86)', 'border:1px solid #3d5a80',
-    'border-radius:4px', 'padding:8px 10px', 'pointer-events:none',
-    'font-family:Segoe UI,Microsoft YaHei,sans-serif', 'color:#e8eef6',
-    'box-shadow:0 4px 18px rgba(0,0,0,.45)',
-  ].join(';');
-  const head = document.createElement('div');
-  head.textContent = 'QC 巡检判定 · 实时';
-  head.style.cssText = 'font-size:12px;font-weight:700;letter-spacing:1px;padding-bottom:6px;border-bottom:1px solid #3d5a80;margin-bottom:6px;color:#8fc4f0;';
-  panel.appendChild(head);
-  const rowsWrap = document.createElement('div');
-  panel.appendChild(rowsWrap);
-  const foot = document.createElement('div');
-  foot.style.cssText = 'margin-top:7px;padding-top:6px;border-top:1px solid #3d5a80;font-size:10px;display:flex;justify-content:space-between;color:#9fb4cc;';
-  panel.appendChild(foot);
-
-  const boardObj = new CSS2DObject(panel);
-  boardObj.position.set(0, 6.0, 0.1);
-  qcBoardGroup.add(boardObj);
-  qcBoardGroup.userData.rowsWrap = rowsWrap;
-  qcBoardGroup.userData.foot = foot;
+  // 屏面做成自发光深色板，远看像在亮，具体读数看顶部 QC 条
+  const screen = box(4.2, 2.2, 0.02, 0x16283c, {
+    emissive: 0x1d3a5c, emissiveIntensity: 0.35, metal: 0.2, rough: 0.5,
+  });
+  screen.position.set(0, 6.0, 0.08); qcBoardGroup.add(screen);
+  addLabel(qcBoardGroup, 'QC 目视化看板', 7.5).position.set(0, 7.5, 0);
 }
 scene.add(qcBoardGroup);
 
@@ -1725,42 +1709,57 @@ function pushQcRecord() {
   renderQcBoard();
 }
 function renderQcBoard() {
-  const wrap = qcBoardGroup.userData.rowsWrap;
-  const foot = qcBoardGroup.userData.foot;
-  if (!wrap) return;
-  wrap.innerHTML = '';
-  if (qcRecords.length === 0) {
-    const empty = document.createElement('div');
-    empty.textContent = '等待首批巡检样品…';
-    empty.style.cssText = 'font-size:11px;color:#6d8299;padding:6px 2px;';
-    wrap.appendChild(empty);
+  // 渲染到顶部 QC 条（不再画进 3D 场景）
+  const wrap = document.getElementById('qc-strip-rows');
+  const stats = document.getElementById('qc-strip-stats');
+  if (wrap) {
+    wrap.innerHTML = '';
+    if (qcRecords.length === 0) {
+      const empty = document.createElement('span');
+      empty.className = 'qc-strip-empty';
+      empty.textContent = '等待首批巡检样品…';
+      wrap.appendChild(empty);
+    }
+    // 顶部横向空间有限，按「可用宽度」反算能放几条 chip。
+    // 注意不能读 .qc-strip 的 clientWidth：它是 width:max-content，宽度由内容决定，
+    // 拿它反推会自锁成永远 1 条。要用 CSS max-width 的同一套算式（视口减左右面板列）。
+    // 固定开销：标题约 100px（<=1360px 时隐藏）、统计区约 190px、padding 28px。
+    const CSS_MAX = window.innerWidth - 688;          // 与 .qc-strip max-width 一致
+    const titleCost = window.innerWidth > 1360 ? 100 : 0;
+    const avail = CSS_MAX - titleCost - 190 - 28;
+    const maxChips = Math.max(1, Math.min(4, Math.floor(avail / 152)));
+    for (const r of qcRecords.slice(0, maxChips)) {
+      const chip = document.createElement('span');
+      chip.className = 'qc-chip';
+      const pn = document.createElement('span');
+      pn.className = 'qc-chip-pn';
+      pn.textContent = r.pn;
+      const t = document.createElement('span');
+      t.className = 'qc-chip-t';
+      t.textContent = r.t;
+      const tag = document.createElement('span');
+      tag.className = 'qc-chip-tag ' + (r.result === 'OK' ? 'qc-chip-ok' : 'qc-chip-ng');
+      tag.textContent = r.result;
+      // 极端窄屏可能 chip 本身也要缩，但至少保证 1 条不会溢出
+      chip.appendChild(pn); chip.appendChild(t); chip.appendChild(tag);
+      wrap.appendChild(chip);
+    }
   }
-  for (const r of qcRecords) {
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;font-size:11px;padding:3px 2px;border-bottom:1px solid rgba(61,90,128,.35);';
-    const left = document.createElement('span');
-    left.textContent = r.pn;
-    left.style.cssText = 'font-family:Consolas,monospace;color:#cfe0f0;';
-    const mid = document.createElement('span');
-    mid.textContent = r.t;
-    mid.style.cssText = 'font-size:9px;color:#7f95ad;';
-    const tag = document.createElement('span');
-    tag.textContent = r.result;
-    const ok = r.result === 'OK';
-    tag.style.cssText = 'font-weight:700;font-size:10px;padding:1px 7px;border-radius:2px;color:#fff;background:' + (ok ? '#3f8f4a' : '#b03434') + ';';
-    row.appendChild(left); row.appendChild(mid); row.appendChild(tag);
-    wrap.appendChild(row);
-  }
-  if (foot) {
-    foot.innerHTML = '';
-    const a = document.createElement('span');
-    a.textContent = '已检 ' + qcInspected;
-    const b = document.createElement('span');
-    b.textContent = 'NG ' + qcNgCount;
+  if (stats) {
     const total = qcInspected || 1;
-    const c = document.createElement('span');
-    c.textContent = '合格率 ' + (100 - (qcNgCount / total) * 100).toFixed(1) + '%';
-    foot.appendChild(a); foot.appendChild(b); foot.appendChild(c);
+    const pass = (100 - (qcNgCount / total) * 100).toFixed(1);
+    stats.innerHTML = '';
+    const mk = (label, value) => {
+      const s = document.createElement('span');
+      s.textContent = label + ' ';
+      const b = document.createElement('b');
+      b.textContent = value;
+      s.appendChild(b);
+      return s;
+    };
+    stats.appendChild(mk('已检', String(qcInspected)));
+    stats.appendChild(mk('NG', String(qcNgCount)));
+    stats.appendChild(mk('合格率', pass + '%'));
   }
 }
 
@@ -1873,6 +1872,8 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
   labelRenderer.setSize(window.innerWidth, window.innerHeight);
+  // QC 条的记录条数是按视口宽度算的，缩放窗口后要重排，否则会溢出或留白
+  renderQcBoard();
 });
 
 animate();
@@ -1957,4 +1958,10 @@ window.__amrGap = () => {
   const d = amr1.mesh.position.distanceTo(amr2.mesh.position);
   console.log('physical gap =', d.toFixed(2), 'm', d < 1.1 ? '!! TOO CLOSE' : 'OK');
   return d;
+};
+
+// 顶部 QC 条排版自检：不等 AMR 跑圈，直接灌记录看宽度/换行/溢出
+window.__qcInject = (n = 5) => {
+  for (let i = 0; i < n; i++) { qcInspected++; pushQcRecord(); }
+  return { records: qcRecords.length, qcInspected, qcNgCount };
 };

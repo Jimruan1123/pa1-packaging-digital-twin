@@ -223,9 +223,38 @@ job.arcPos   = 该点在走道中线上的投影     ← 只用来算 job.arc，
 `__stopCheck()` 所有停靠点弧长与偏离环线距离（须全 0）
 `__flowProbe()` 货架分布、料箱数、呼叫数、已检/已收、两车 state/job/arc/tgt/eff/gapArc/phys
 `__amrGap()` 两车实际物理间距（< 1.1 报警）
+`__qcInject(n)` 直接灌 n 条 QC 判定记录，不用等 AMR 跑圈就能看顶部条排版
 
 `__flowProbe()` 里的 `debugEff/debugGapArc/debugPhys` 是定位"车为什么停住"的主要手段，
 交付前可移除，但**调试期别删**。
+
+## PA1 顶部 QC 条（HTML 覆盖层，不在 3D 里）
+
+QC 巡检实时判定原来是 3D 场景内一块 290px 宽的 `CSS2DObject`，悬在中央上方挡视口，
+已改为顶栏下方的 HTML 横条：`index.html` 里的 `.qc-strip`（`#qc-strip-rows` + `#qc-strip-stats`），
+样式在 `src/pa1-style.css` 末尾。3D 里只留看板实体（黑框 + 吊杆 + 自发光屏面 + 文字标签），
+**不要再往 `qcBoardGroup` 里加 CSS2DObject 面板**。
+
+定位：`position:fixed; top:56px; left:50%; transform:translateX(-50%); width:max-content;
+max-width:calc(100vw - 688px); height:34px; z-index:60`。688 = 左面板 340 + 右面板 300 + 余量，
+改面板宽度必须同步改这个数**以及** `renderQcBoard()` 里的 `CSS_MAX`。
+
+chip 条数按视口宽度算，勿改回固定值：
+
+```js
+const CSS_MAX = window.innerWidth - 688;
+const titleCost = window.innerWidth > 1360 ? 100 : 0;   // 标题在 <=1360 时隐藏
+const avail = CSS_MAX - titleCost - 190 - 28;           // 190=统计区, 28=padding+gap
+const maxChips = Math.max(1, Math.min(4, Math.floor(avail / 152)));
+```
+
+- ❌ 固定 4 条：1600 及以下 `qc-strip-rows` 会横向溢出
+- ❌ 用 `.qc-strip` 的 `clientWidth` 反推条数：它是 `width:max-content`，宽度由内容决定，会自锁成永远 1 条
+- 两级媒体查询降级：`<=1360px` 隐藏标题，`<=1100px` 整条 `display:none`
+- `resize` 里必须调 `renderQcBoard()`，否则缩放后条数不重排
+
+实测（`__qcInject(6)` 后）：1920→4 chip / 1600→3 / 1440→2 / 1280→2，
+chip 宽 139-140px，`gapUnderTopbar=0`，与其他固定面板无重叠。
 
 ## 部署：ESA Pages
 

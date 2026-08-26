@@ -227,6 +227,54 @@ job.arcPos   = 该点在走道中线上的投影     ← 只用来算 job.arc，
 
 `__flowProbe()` 里的 `debugEff/debugGapArc/debugPhys` 是定位"车为什么停住"的主要手段，
 交付前可移除，但**调试期别删**。
+`__packProbe()` 盖章/打包/码垛/拖运状态机快照
+`__forcePallet(n)` 跳到「差 n 箱满垛」，验证拖运不用等 270s 仿真时间
+`__boundsProbe()` 所有 mesh 是否落在四面墙内
+
+## PA1 场地尺寸单一来源
+
+`FLOOR_W=42, FLOOR_D=34` 是唯一来源，外墙从它推导：
+`FACTORY_W/D = FLOOR_W/D`，墙中心线在 `±(FACTORY_W/2 + WALL_THICK/2)`，
+南北墙长 `FACTORY_W + WALL_THICK*2`（含拐角搭接，四角无缝）。
+改场地只改 `FLOOR_W/FLOOR_D`，墙、窗、内地坪、网格会跟着走。
+
+- 网格用 `buildFloorGrid()` 自己画，**不要用 `GridHelper`**：它只能画正方形，
+  矩形场地会溢出地面边缘。
+- 网格 `y=0.0112` 必须高于内地坪 `y=0.0105`，否则被整块盖住看不见。
+- 门/门楣/侧门贴在东西墙上，必须 `rotation.y = ±PI/2`，否则板面朝向错、会穿墙。
+- 用 `__boundsProbe()` 验证：`outsideCount` 应为 0（门柱这类贴墙件允许 0.45m 内的容差）。
+
+## PA1 打包区：只有 INPUT，没有 OUTPUT
+
+物料单向流：`AMR 卸满架 -> 盖章工人取箱上滚筒线 -> 滚筒线 -> 打包台装箱 -> 码垛 -> 人工拉栈板去发货区`。
+
+- `packInputSlot=(2.8,0,-5.8)`，`packOutputSlot/packOutputStop` **已删除**。
+  空架腾空后就停在 INPUT 位原地，等 AMR 顺路顶走（`updateShelves` 里 pack 分支不挪位）。
+- **x=2.8 不是随便取的**：南段沿 +X 行驶，南区绿架停靠点在 arc 25.7（x=+2.3），
+  INPUT 必须排在其下游，得 arc 26.2。若放 x=0（arc 23.4）就在上游，
+  AMR 取完货要绕整整 60m 才能卸货（环线周长 62.4m），看起来像卡死。
+- 单 INPUT 位必须配 `stationOccupied(mission)` 闸门：位上有架子就不接新取货单。
+  少了这个闸门，两个货架会叠在同一格；写成「接单后在位外等」则会和空架回收互相等成活锁。
+- 滚筒线沿 +Z 流动，`CONV_IN_Z/CONV_OUT_Z` 是工位定位基准。盖章台在进料端**东侧**
+  （与 INPUT 同侧，否则工人每次取箱要横穿滚筒线），打包台在出料端。
+
+## PA1 工人动作：状态机驱动，不是摆手臂
+
+三类工人都有离散动作循环，动作要能被探针观察到状态迁移：
+
+- 盖章工人 `stampState`：`idle -> take -> press -> putback`。press 是印头下压 3 次的离散动作。
+- 打包工人 `packState`：`wait -> to_line -> pick -> to_table -> packing -> to_pallet -> place -> back`，
+  满垛后 `tow_out -> tow_back` 拉栈板去发货区。**码垛计数由 `place` 动作调 `stackOneCarton()` 驱动**，
+  不再是定时自动长箱子。
+- QC 检测员 `qcAnimState`：`idle -> inspect -> stamp`，stamp 时实体判定章 `qcStamp` 跟着下压。
+- 产线工人 `working` 态是 4.2s 的装件/按启动/等加工/取件四段循环，用 `w.workPhase`
+  各区独立计时（不要用全局 `performance.now()`，否则四个区同步得像广播体操）。
+- 拖栈板速度 `dt * 0.042`（约 24s 走 26m，合 1.1m/s）。调快会像在飘。
+
+## PA1 巡检样品是抽检
+
+`animateWorker` 里 `Math.random() < 0.16` 才送样，且非样品分支只试 `['product']`。
+原来是 0.35 且两种类型互为 fallback，实际送样比例接近一半，看着像全检。
 
 ## PA1 顶部 QC 条（HTML 覆盖层，不在 3D 里）
 

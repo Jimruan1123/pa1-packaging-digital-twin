@@ -100,11 +100,31 @@ const P = {
   pallet: 0x8b6f47, carton: 0x3c78a8, andon: 0xf5b300,
 };
 
-// 场地 50x40
-const floor = floorTile(42, 34, P.floor);
+// ===== 场地尺寸（单一来源）=====
+// 厂房外墙、内地坪、网格全部从这两个数推导，改这里四面墙会跟着走。
+// 约束：所有功能区（出货区 x 到 -18.5，物料超市 x 到 15.5，绿化 z 到 ±15）
+// 必须落在 [-FLOOR_W/2, FLOOR_W/2] x [-FLOOR_D/2, FLOOR_D/2] 之内。
+const FLOOR_W = 42;
+const FLOOR_D = 34;
+const floor = floorTile(FLOOR_W, FLOOR_D, P.floor);
 scene.add(floor);
-const grid = new THREE.GridHelper(42, 42, P.floorLine, P.floorLine);
-grid.position.y = 0.01;
+
+// 1m 地面网格。GridHelper 只能画正方形，这里场地是矩形，所以自己画，
+// 否则网格会溢出地面边缘（或需要 scale 把格子压成非正方形）。
+function buildFloorGrid(w, d, step, color) {
+  const pts = [];
+  const hw = w / 2, hd = d / 2;
+  for (let x = -hw; x <= hw + 1e-6; x += step) pts.push(x, 0, -hd, x, 0, hd);
+  for (let z = -hd; z <= hd + 1e-6; z += step) pts.push(-hw, 0, z, hw, 0, z);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+    color, transparent: true, opacity: 0.45,
+  }));
+}
+const grid = buildFloorGrid(FLOOR_W, FLOOR_D, 1, P.floorLine);
+// 必须高于内地坪（0.0105），否则网格会被内地坪整块盖住看不见
+grid.position.y = 0.0112;
 scene.add(grid);
 
 // ===== 生产区坐标（四叶草布局） =====
@@ -423,9 +443,14 @@ for (let i = 0; i < 24; i++) {
   roller.position.set(0, convHeight+0.015, z);
   conveyorGroup.add(roller);
 }
-conveyorGroup.position.set(0, 0, -2);
+// 滚筒线沿 +Z 流动：进料端(南, -Z)紧邻 PACK INPUT，出料端(北, +Z)接打包台。
+// CONV_IN_Z/CONV_OUT_Z 是流程各工位定位的基准，改滚筒线位置只需改 CONV_CENTER_Z。
+const CONV_CENTER_Z = -1.6;
+conveyorGroup.position.set(0, 0, CONV_CENTER_Z);
+const CONV_IN_Z = CONV_CENTER_Z - convLength / 2;    // -4.1 进料端（靠 INPUT）
+const CONV_OUT_Z = CONV_CENTER_Z + convLength / 2;   //  0.9 出料端（靠打包台）
 packGroup.add(conveyorGroup);
-addLabel(conveyorGroup, '滚筒包装线', 1.6).position.set(0, 1.6, -convLength/2 - 0.2);
+addLabel(conveyorGroup, '滚筒包装线', 1.6).position.set(-0.9, 1.6, -convLength/2 - 0.1);
 
 const convBins = [];
 for (let i = 0; i < 4; i++) {
@@ -436,28 +461,39 @@ for (let i = 0; i < 4; i++) {
   convBins.push(b);
 }
 
-// 质检盖章工位（西端）
+// 质检盖章工位：滚筒线进料侧。工人从 PACK INPUT 的货架取箱 -> 盖章 -> 放上滚筒线。
+// 摆在东侧，与 PACK INPUT 同侧，否则工人每次取箱都要横穿滚筒线。
+const STAMP_X = 1.9, STAMP_Z = CONV_IN_Z + 0.9;       // 台面 (1.9, -3.2)
 const stampTable = box(1.2, 0.85, 1.2, P.machine);
-stampTable.position.set(-2.5, 0.425, -2.5); packGroup.add(stampTable);
-const stamper = box(0.2, 0.2, 0.15, P.machineAccent, { metal: 0.8, rough: 0.2 });
-stamper.position.set(-2.5, 1.05, -2.25); packGroup.add(stamper);
+stampTable.position.set(STAMP_X, 0.425, STAMP_Z); packGroup.add(stampTable);
+const stamper = box(0.22, 0.22, 0.16, P.machineAccent, { metal: 0.8, rough: 0.2 });
+stamper.position.set(STAMP_X - 0.15, 1.05, STAMP_Z); packGroup.add(stamper);
+// 站位夹在皮带与盖章台之间，两边都在臂展内
+const STAMPW_HOME = new THREE.Vector3(0.95, 0, STAMP_Z);
 const qcPackWorker = buildWorker(P.packWorker);
-qcPackWorker.position.set(-2.5, 0, -1.3); qcPackWorker.rotation.y = Math.PI;
+qcPackWorker.position.copy(STAMPW_HOME);
+qcPackWorker.rotation.y = Math.PI / 2;                // 面朝东（盖章台方向）
 packGroup.add(qcPackWorker);
-addLabel(packGroup, '质检盖章', 1.5).position.set(-2.5, 1.5, -0.8);
+addLabel(packGroup, '质检盖章', 1.6).position.set(STAMP_X, 1.6, STAMP_Z - 1.1);
 
-// 打包工作台（东端）
-const packTable = box(2, 0.85, 1.6, P.machine);
-packTable.position.set(2.5, 0.425, -1.5); packGroup.add(packTable);
+// 打包工作台：滚筒线出料端东侧，工人从线尾取箱 -> 装箱 -> 转身码垛
+const PACK_X = 1.9, PACK_Z = CONV_OUT_Z + 0.4;        // 台面 (1.9, 1.3)
+const packTable = box(1.8, 0.85, 1.4, P.machine);
+packTable.position.set(PACK_X, 0.425, PACK_Z); packGroup.add(packTable);
 const vacMachine = new THREE.Group();
 const vacBody = box(0.5, 0.6, 0.5, P.machineDark);
 vacBody.position.y = 0.3; vacMachine.add(vacBody);
 const vacLed = sph(0.03, 8, 0x6aa84f, { emissive: 0x6aa84f, emissiveIntensity: 0.7 });
 vacLed.position.set(0, 0.78, 0.2); vacMachine.add(vacLed);
-vacMachine.position.set(3.6, 0, -2.8); packGroup.add(vacMachine);
+vacMachine.position.set(PACK_X + 1.2, 0, PACK_Z - 0.6); packGroup.add(vacMachine);
+// 打包工人的作业原点：线尾正北，面朝滚筒线。取箱 -> 打包台 -> 码垛位 都从这里出发。
+// 注意 x 必须离开皮带（皮带 x 半宽 0.4），否则人会站在滚筒线上。
+const PACK_LINE_END = new THREE.Vector3(0, 0, CONV_OUT_Z);
+const PACKW_HOME = new THREE.Vector3(0, 0, CONV_OUT_Z + 1.0);   // (0, 1.9)
 const packWorker = buildWorker(P.worker);
-packWorker.position.set(2.5, 0, -0.5); packWorker.rotation.y = Math.PI;
+packWorker.position.copy(PACKW_HOME); packWorker.rotation.y = Math.PI;  // 面朝线尾
 packGroup.add(packWorker);
+addLabel(packGroup, '装箱打包', 1.6).position.set(PACK_X, 1.6, PACK_Z + 1.1);
 
 // 码垛区
 function buildPallet() {
@@ -474,6 +510,9 @@ function buildPallet() {
 }
 const palletGroup = new THREE.Group();
 palletGroup.add(buildPallet());
+// 数组次序必须与「层内 9 箱、逐层叠高」的堆放顺序一致：
+// idx = layer*9 + row*3 + col。stackOneCarton 按 idx 递增放箱，
+// 所以第 10 箱自动落到第二层，垛形是从下往上长的。
 const palletBoxes = [];
 for (let layer = 0; layer < 3; layer++)
   for (let row = 0; row < 3; row++)
@@ -482,47 +521,44 @@ for (let layer = 0; layer < 3; layer++)
       b.position.set(-0.33+col*0.33, 0.15+layer*0.3, -0.33+row*0.33);
       b.visible = false; palletGroup.add(b); palletBoxes.push(b);
     }
-palletGroup.position.set(3, 0, 1.5);
+// 码垛位在打包台正北，工人两步可达。packGroup 未做位移/旋转，故局部坐标 = 世界坐标，
+// 拖运到发货区可以直接用世界坐标插值。
+const PALLET_HOME_X = 0, PALLET_HOME_Z = 3.4;
+palletGroup.position.set(PALLET_HOME_X, 0, PALLET_HOME_Z);
 packGroup.add(palletGroup);
-addLabel(palletGroup, '码垛 3x3x3', 2).position.set(0, 2, 0.5);
+addLabel(palletGroup, '码垛 3x3x3', 2).position.set(0, 2, 0.8);
 
-// 辅材货架
+// 辅材货架（挪到打包区西北角，让开码垛位与拖运路线）
 for (let s = 0; s < 2; s++) {
   const shelf = box(0.5, 1.8, 1.2, P.shelf, { metal: 0.3, rough: 0.7 });
-  shelf.position.set(-3+s*0.6, 0.9, 3); packGroup.add(shelf);
+  shelf.position.set(-3.2 + s * 0.6, 0.9, 2.2); packGroup.add(shelf);
   for (let i = 0; i < 3; i++) {
     const sh = box(0.55, 0.03, 1.25, P.machineDark);
-    sh.position.set(-3+s*0.6, 0.3+i*0.6, 3);
+    sh.position.set(-3.2 + s * 0.6, 0.3 + i * 0.6, 2.2);
     packGroup.add(sh);
   }
 }
-addLabel(packGroup, '辅材货架', 2.2).position.set(-2.7, 2.2, 3.8);
-// ===== 打包区 INPUT/OUTPUT 接口（北侧，紧贴环线北段） =====
-// INPUT: AMR 把满绿架放这里 -> 打包工人取箱上滚筒线
-// OUTPUT: 空架停放位，等 AMR 回收送回产线
-// 顺序很关键：环线北段沿 -X 行驶，所以 INPUT 必须在上游(+X)、OUTPUT 在下游(-X)。
-// 这样 AMR 先卸满架、往前挪两米再顶空架带走，不必绕一整圈（62m）回头取空架。
-const packInputSlot = new THREE.Vector3(1.3, 0, 5.0);
-const packOutputSlot = new THREE.Vector3(-1.3, 0, 5.0);
-const packInputStop = new THREE.Vector3(1.3, 0, AISLE_RADIUS);
-const packOutputStop = new THREE.Vector3(-1.3, 0, AISLE_RADIUS);
+addLabel(packGroup, '辅材货架', 2.2).position.set(-2.9, 2.2, 3.1);
+// ===== 打包区 INPUT 接口（南侧，对齐滚筒线进料端） =====
+// 打包区只有 INPUT，没有 OUTPUT：满绿架卸在这里，工人就近取箱上滚筒线；
+// 架子腾空后原地待收，AMR 下一趟顺路顶走。这样物料走向是单向的：
+//   AMR 卸货 -> 工人上线 -> 滚筒线 -> 盖章 -> 打包 -> 码垛 -> 人工拖去发货区
+// 位置依据：滚筒线沿 +Z 流动，进料端在 z = CONV_IN_Z（约 -4.5），
+// 所以 INPUT 必须落在进料端与南段走道之间，工人两步就能上线，不用绕整个打包区。
+// 环线次序约束：南段沿 +X 行驶，南侧生产区绿架停靠点在 arc 25.7（x=+2.3）。
+// INPUT 必须排在它下游（x > 2.3），否则 AMR 从南区取完货得绕整整 60m 才能卸货
+// （单向环线周长 62.4m）。取 x=2.8 -> arc 26.2，紧跟其后。
+const packInputSlot = new THREE.Vector3(2.8, 0, -5.8);
+const packInputStop = new THREE.Vector3(2.8, 0, -AISLE_RADIUS);
 {
   const inF = floorTile(2.2, 1.8, P.greenZone);
   inF.position.set(packInputSlot.x, 0.014, packInputSlot.z); scene.add(inF);
-  addLabel(scene, 'PACK INPUT', 0.5).position.set(packInputSlot.x, 0.5, packInputSlot.z - 1.1);
-  const outF = floorTile(2.2, 1.8, 0xc0c0c0);
-  outF.position.set(packOutputSlot.x, 0.014, packOutputSlot.z); scene.add(outF);
-  addLabel(scene, 'PACK OUTPUT', 0.5).position.set(packOutputSlot.x, 0.5, packOutputSlot.z - 1.1);
-  // 打包区初始空架放 OUTPUT 位。同样要加入 productShelfAtZone 参与流转。
-  const pkMesh = buildMobileShelf(P.productBin);
-  pkMesh.position.copy(packOutputSlot);
-  scene.add(pkMesh);
-  const obj = {
-    mesh: pkMesh, type: 'product', zoneIdx: -1, carriedBy: null, location: 'pack',
-    hasBins: false, binCount: 0, unloadTimer: 0, call: CALL_NONE, atOutput: true, homeAngle: 0,
-  };
-  productShelfAtZone.push(obj);
-  registerShelf(obj);
+  const inEdge = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(2.2, 0.02, 1.8)),
+    new THREE.LineBasicMaterial({ color: 0x2f6b2f, transparent: true, opacity: 0.85 })
+  );
+  inEdge.position.set(packInputSlot.x, 0.02, packInputSlot.z); scene.add(inEdge);
+  addLabel(scene, 'PACK INPUT', 0.5).position.set(packInputSlot.x, 0.5, packInputSlot.z - 1.15);
 }
 
 // ===== QC室（西侧，紧贴环线） =====
@@ -558,8 +594,18 @@ for (let i = 0; i < 3; i++) {
   b.position.set(qcX - 0.5 + i * 0.3, 1.0, qcZ - 1.2);
   scene.add(b);
 }
+// QC 判定章（实体，盖章动作时会随手下压）
+const QC_STAMP_Y = 1.02;
+const qcStamp = box(0.22, 0.22, 0.16, P.machineAccent, { metal: 0.8, rough: 0.2 });
+qcStamp.position.set(qcX + 0.55, QC_STAMP_Y, qcZ - 0.95); scene.add(qcStamp);
+// 判定章下方的记录台
+{
+  const pad = box(0.4, 0.02, 0.3, 0xf0ead0, { rough: 0.9 });
+  pad.position.set(qcX + 0.55, 0.87, qcZ - 0.75); scene.add(pad);
+}
 const qcWorker = buildWorker(P.qcWorker);
-qcWorker.position.set(qcX - 1, 0, qcZ + 0.5); qcWorker.rotation.y = 0;
+// 站在工作台南侧，面朝台面(-Z)，手正好落在仪器与判定章之间
+qcWorker.position.set(qcX + 0.2, 0, qcZ - 0.05); qcWorker.rotation.y = Math.PI;
 scene.add(qcWorker);
 addLabel(scene, 'QC 检测室', 2.5).position.set(qcX, 2.5, qcZ + 3);
 
@@ -801,6 +847,16 @@ function getDockPos(amr) {
 }
 
 // ===== AMR 调度器 =====
+// 目的站卸货位是否被占。这是单 INPUT 位布局的关键约束：
+// 打包区只有一个 INPUT 位（无 OUTPUT 区），那里有架子就不能再送一个过来，否则两架重叠。
+// QC 有独立 OUTPUT 台，已腾空并挪到 OUTPUT 的架子不占 INPUT，不算堵。
+function stationOccupied(mission) {
+  if (mission === 'product') {
+    return productShelfAtZone.some(s => s.location === 'pack' && !s.carriedBy);
+  }
+  return sampleShelfAtZone.some(s => s.location === 'qc' && !s.carriedBy && !s.atOutput);
+}
+
 // 找最近一个待呼叫（CALL_PENDING），生成任务（pickup -> dropoff）
 // pickup: 到产线 OUTPUT 取满架 | dropoff: 到 QC/PACK INPUT 放架
 function dispatchAMR(amr) {
@@ -823,10 +879,11 @@ function dispatchAMR(amr) {
       kind: 'pickup_empty',
       shelf: empty,
       returnTo: empty.returnTo,
-      // 停到货架实际所在的 OUTPUT 位（潜伏顶升必须车在架下），
+      // 停到货架实际所在的位置（潜伏顶升必须车在架下），
       // arc 用走道中线上的投影点，保证行驶段始终在走道内。
-      dockPos: (isQC ? qcOutputSlot : packOutputSlot).clone(),
-      arcPos: (isQC ? qcOutputStop : packOutputStop).clone(),
+      // QC 有独立 OUTPUT 台；打包区没有 OUTPUT，空架就留在 INPUT 位原地待收。
+      dockPos: (isQC ? qcOutputSlot : packInputSlot).clone(),
+      arcPos: (isQC ? qcOutputStop : packInputStop).clone(),
     };
     empty.reservedBy = amr;
     amr.job.arc = arcOfPoint(amr.job.arcPos);
@@ -834,30 +891,33 @@ function dispatchAMR(amr) {
     return;
   }
 
-  // 优先级 2：响应 PDA 呼叫，取满架
-  const shelfArr = amr.mission === 'sample' ? sampleShelfAtZone : productShelfAtZone;
-  let best = null, bestDist = Infinity;
-  for (const sh of shelfArr) {
-    if (sh.call === CALL_PENDING && sh.location === 'zone' && sh.hasBins && !sh.carriedBy) {
-      // 产线必须留一个在位货架给工人继续上货，不能把区里最后一个架子拖走
-      const d = arcDist(arcOfPoint(sh.mesh.position), amr.arc);
-      if (d < bestDist) { bestDist = d; best = sh; }
+  // 优先级 2：响应 PDA 呼叫，取满架。
+  // 目的站卸货位被占时直接跳过取货，让车去待命，
+  // 否则车会拉着满架堵在 INPUT 位外面，而空架回收又排在它后面 —— 活锁。
+  if (!stationOccupied(amr.mission)) {
+    const shelfArr = amr.mission === 'sample' ? sampleShelfAtZone : productShelfAtZone;
+    let best = null, bestDist = Infinity;
+    for (const sh of shelfArr) {
+      if (sh.call === CALL_PENDING && sh.location === 'zone' && sh.hasBins && !sh.carriedBy) {
+        const d = arcDist(arcOfPoint(sh.mesh.position), amr.arc);
+        if (d < bestDist) { bestDist = d; best = sh; }
+      }
     }
-  }
-  if (best) {
-    best.call = CALL_ASSIGNED;
-    const key = amr.mission === 'sample' ? 'sampleStop' : 'productStop';
-    const slot = amr.mission === 'sample' ? sampleDocks[best.zoneIdx] : productDocks[best.zoneIdx];
-    amr.job = {
-      kind: 'pickup',
-      zoneIdx: best.zoneIdx,
-      shelf: best,
-      dockPos: slot.clone(),
-      arcPos: zoneStops[best.zoneIdx][key].clone(),
-    };
-    amr.job.arc = arcOfPoint(amr.job.arcPos);
-    amr.state = 'traveling';
-    return;
+    if (best) {
+      best.call = CALL_ASSIGNED;
+      const key = amr.mission === 'sample' ? 'sampleStop' : 'productStop';
+      const slot = amr.mission === 'sample' ? sampleDocks[best.zoneIdx] : productDocks[best.zoneIdx];
+      amr.job = {
+        kind: 'pickup',
+        zoneIdx: best.zoneIdx,
+        shelf: best,
+        dockPos: slot.clone(),
+        arcPos: zoneStops[best.zoneIdx][key].clone(),
+      };
+      amr.job.arc = arcOfPoint(amr.job.arcPos);
+      amr.state = 'traveling';
+      return;
+    }
   }
 
   // 都没有活 -> 回自己的充电泊位待命（每车专属泊位，不会互相占位）
@@ -1174,20 +1234,49 @@ function animateWorker(w, dt) {
   const speed = 1.1;
 
   switch (w.state) {
-    case 'working':
-      if (ud.armL) ud.armL.rotation.x = Math.sin(performance.now() * 0.003 + w.zoneIdx) * 0.2;
-      if (ud.armR) ud.armR.rotation.x = Math.sin(performance.now() * 0.003 + w.zoneIdx + 1) * 0.2;
+    case 'working': {
+      // 机台旁的生产动作：装件 -> 按启动 -> 取件，三段循环，比单纯摆手臂像在干活。
+      // 用 w.workPhase 累计而不是全局 performance.now()，这样四个区节奏各自独立。
+      w.workPhase = (w.workPhase || 0) + dt;
+      const cyc = w.workPhase % 4.2;
+      if (cyc < 1.6) {
+        // 双手在机台上装件（小幅往复）
+        const s = Math.sin(cyc * 5.0);
+        if (ud.armL) ud.armL.rotation.x = -0.75 + s * 0.22;
+        if (ud.armR) ud.armR.rotation.x = -0.75 - s * 0.22;
+      } else if (cyc < 2.3) {
+        // 右手抬起按启动按钮，停一下
+        const t = (cyc - 1.6) / 0.7;
+        const push = t < 0.5 ? t * 2 : 1;
+        if (ud.armL) ud.armL.rotation.x = -0.25;
+        if (ud.armR) ud.armR.rotation.x = -0.95 - push * 0.25;
+      } else if (cyc < 3.4) {
+        // 等机台加工，双手自然下垂微动
+        const s = Math.sin(cyc * 2.2);
+        if (ud.armL) ud.armL.rotation.x = s * 0.1;
+        if (ud.armR) ud.armR.rotation.x = -s * 0.1;
+      } else {
+        // 取出成品，弯腰放到线边
+        const t = (cyc - 3.4) / 0.8;
+        const bend = Math.sin(Math.min(1, t) * Math.PI);
+        if (ud.armL) ud.armL.rotation.x = -0.5 - bend * 0.55;
+        if (ud.armR) ud.armR.rotation.x = -0.5 - bend * 0.55;
+      }
       w.timer -= dt;
       if (w.timer <= 0) {
-        // 只在目标流转架「在位且未满」时才开始搬运，否则继续作业等待。
-        const wantSample = Math.random() < 0.35;
-        const tryTypes = wantSample ? ['sample', 'product'] : ['product', 'sample'];
+        // 巡检样品是抽检，频率必须远低于成品：约 1/6 的搬运是送样。
+        // 频率太高会让 QC 一直在收样、AMR-01 满负荷，看起来像全检。
+        const wantSample = Math.random() < 0.16;
+        const tryTypes = wantSample ? ['sample', 'product'] : ['product'];
         let picked = null;
         for (const t of tryTypes) {
           const sh = shelfAt(w.zoneIdx, t);
           if (sh && sh.location === 'zone' && !sh.carriedBy && sh.binCount < 3) { picked = t; break; }
         }
         if (!picked) { w.timer = 2.0; break; }
+        // 离开工位前把手臂放平，避免带着「弯腰姿态」走路
+        if (ud.armL) ud.armL.rotation.x = 0;
+        if (ud.armR) ud.armR.rotation.x = 0;
         w.binType = picked;
         const dockLocalX = picked === 'sample' ? -2.3 : 2.3;
         w.target.set(dockLocalX, 0, DOCK_LOCAL_Z - 1.15);
@@ -1198,6 +1287,7 @@ function animateWorker(w, dt) {
         w.state = 'to_shelf';
       }
       break;
+    }
 
     case 'to_shelf': {
       const cur = w.mesh.position;
@@ -1303,12 +1393,14 @@ function updateShelves(dt) {
         s.unloadTimer = 0.8;  // 下一箱间隔
       }
     }
-    // 空架挪到 OUTPUT 位待回收
+    // 空架待回收。QC 区把空架挪到独立的 OUTPUT 台；
+    // 打包区没有 OUTPUT 区，空架就停在 INPUT 位不动，等 AMR 顺路顶走。
     if (s.binCount === 0 && !s.atOutput) {
       s.atOutput = true;
-      const outSlot = s.location === 'qc' ? qcOutputSlot : packOutputSlot;
-      s.mesh.position.copy(outSlot);
-      s.mesh.position.y = 0;
+      if (s.location === 'qc') {
+        s.mesh.position.copy(qcOutputSlot);
+        s.mesh.position.y = 0;
+      }
     }
   }
 }
@@ -1335,55 +1427,61 @@ function recycleEmptyShelves(mission) {
   return null;
 }
 // ===== 码垛 & 出货 =====
+// 码垛不再是「定时自动长箱子」：每一层箱子都由打包工人走过去亲手放上，
+// 计数由 updatePackWorkers 里的 placing 动作驱动（见 stackOneCarton）。
+// 满 27 箱后由工人拉着栈板走到发货区，人和栈板一起移动。
 let palletCount = 0;
-let palletState = 'building'; // building / towing / resetting
+let palletState = 'building'; // building / towing / returning / resetting
 let palletTimer = 0;
 let palletTowProgress = 0;
-const palletHome = new THREE.Vector3(3.5, 0, 1.5);
-const palletShipTarget = new THREE.Vector3(shipX + 1, 0, shipZ);
+const palletHome = new THREE.Vector3(PALLET_HOME_X, 0, PALLET_HOME_Z);
+// 拖到发货区空位（发货区已有 2 个满垛占了 shipX-2 / shipX+0.5，这里停到东侧空位）
+const palletShipTarget = new THREE.Vector3(shipX + 2.4, 0, shipZ - 0.6);
 let shippedPallets = 0;
 
+// 工人放一箱到栈板上（由打包工人状态机调用）
+function stackOneCarton() {
+  if (palletState !== 'building' || palletCount >= 27) return false;
+  const b = palletBoxes[palletCount];
+  palletCount++;
+  if (b) {
+    b.visible = true;
+    const toY = 0.15 + Math.floor((palletCount - 1) / 9) * 0.3;
+    b.userData._dropFrom = toY + 0.7;
+    b.userData._dropTo = toY;
+    b.position.y = b.userData._dropFrom;
+    b.userData._dropStart = performance.now();
+  }
+  if (palletCount >= 27) {
+    palletState = 'towing';
+    palletTowProgress = 0;
+  }
+  return true;
+}
+
+// 二次贝塞尔拖运路径：绕开中央打包区往西北走，不穿越机台
+const PALLET_TOW_CTRL = new THREE.Vector3(-6.5, 0, 10.5);
+function palletTowPoint(t) {
+  const from = palletHome, to = palletShipTarget, c = PALLET_TOW_CTRL;
+  return new THREE.Vector3(
+    (1-t)*(1-t)*from.x + 2*(1-t)*t*c.x + t*t*to.x,
+    0,
+    (1-t)*(1-t)*from.z + 2*(1-t)*t*c.z + t*t*to.z,
+  );
+}
+
 function updatePallet(dt) {
-  if (palletState === 'building') {
-    palletTimer += dt;
-    const next = Math.floor(palletTimer / 2.2);
-    if (next < 27 && next > palletCount) {
-      palletCount = next;
-      const b = palletBoxes[palletCount - 1];
-      if (b) {
-        b.visible = true;
-        const fromY = b.position.y + 0.8;
-        const toY = b.position.y;
-        b.position.y = fromY;
-        b.userData._dropFrom = fromY;
-        b.userData._dropTo = toY;
-        b.userData._dropStart = performance.now();
-      }
-    }
-    if (palletCount >= 27) {
-      palletState = 'towing';
-      palletTowProgress = 0;
-    }
-  } else if (palletState === 'towing') {
-    palletTowProgress += dt * 0.12;
+  if (palletState === 'towing') {
+    // 位置由打包工人拖着走（updatePackWorkers 里推进 palletTowProgress），
+    // 这里只负责把栈板贴到工人身后。
     const t = Math.min(palletTowProgress, 1);
-    // 曲线拖运
-    const from = palletHome;
-    const to = palletShipTarget;
-    const cx = (from.x + to.x) / 2 - 2;
-    const cz = (from.z + to.z) / 2 + 4;
-    const px = (1-t)*(1-t)*from.x + 2*(1-t)*t*cx + t*t*to.x;
-    const pz = (1-t)*(1-t)*from.z + 2*(1-t)*t*cz + t*t*to.z;
-    palletGroup.position.set(px, 0, pz);
-    palletGroup.rotation.y = -t * Math.PI * 0.4;
-    if (t >= 1) {
-      shippedPallets++;
-      palletState = 'resetting';
-      palletTimer = 0;
-    }
+    const p = palletTowPoint(t);
+    palletGroup.position.set(p.x, 0, p.z);
+    const ahead = palletTowPoint(Math.min(1, t + 0.02)).sub(p);
+    if (ahead.lengthSq() > 1e-5) palletGroup.rotation.y = Math.atan2(ahead.x, ahead.z);
   } else if (palletState === 'resetting') {
     palletTimer += dt;
-    if (palletTimer > 1.5) {
+    if (palletTimer > 1.0) {
       palletGroup.position.copy(palletHome);
       palletGroup.rotation.y = 0;
       palletCount = 0;
@@ -1416,29 +1514,254 @@ function updateConveyor(dt) {
   }
 }
 
-// ===== 打包工人动画 =====
+// ===== 盖章工人（滚筒线前端）=====
+// 动作循环：等箱 -> 从皮带取箱 -> 压印盖章 -> 放回皮带 -> 等箱
+// 盖章是「按下去 + 停顿 + 抬起」的离散动作，不是持续摆臂。
 let stampTimer = 0;
-let packAnimTimer = 0;
-function updatePackWorkers(dt) {
-  stampTimer += dt;
+let stampState = 'idle';   // idle / take / press / putback
+let stampedCount = 0;
+let stampBin = null;       // 手上的箱子（可见实体，取放有增删）
+function updateStampWorker(dt) {
   const ud = qcPackWorker.userData;
-  if (ud.armR) {
-    const cy = (stampTimer % 2.5) / 2.5;
-    if (cy < 0.3) ud.armR.rotation.x = -cy * 3;
-    else if (cy < 0.5) ud.armR.rotation.x = -0.9 + (cy - 0.3) * 4.5;
-    else ud.armR.rotation.x = 0;
-  }
-  stamper.position.y = 1.05 + Math.abs(Math.sin(stampTimer * 2)) * 0.15;
+  const armDown = (v) => { if (ud.armL) ud.armL.rotation.x = v; if (ud.armR) ud.armR.rotation.x = v; };
+  stampTimer += dt;
 
-  packAnimTimer += dt;
-  const pud = packWorker.userData;
-  if (pud.armL) pud.armL.rotation.x = Math.sin(packAnimTimer * 2) * 0.2;
-  if (pud.armR) pud.armR.rotation.x = Math.sin(packAnimTimer * 2 + 1) * 0.25;
+  if (stampState === 'idle') {
+    armDown(Math.sin(performance.now() * 0.002) * 0.08);
+    if (stampTimer > 2.2) {
+      stampTimer = 0; stampState = 'take';
+      stampBin = box(0.26, 0.22, 0.26, P.productBin, { rough: 0.7 });
+      stampBin.position.set(0, 0.95, 0.26);
+      qcPackWorker.add(stampBin);
+    }
+    return;
+  }
+
+  if (stampState === 'take') {
+    // 伸手向皮带取箱（0.6s）
+    const t = Math.min(stampTimer / 0.6, 1);
+    armDown(-1.0 * t);
+    if (t >= 1) { stampTimer = 0; stampState = 'press'; }
+    return;
+  }
+
+  if (stampState === 'press') {
+    // 盖章：印头下压 3 次，每次 0.55s
+    const cyc = stampTimer / 0.55;
+    const phase = cyc % 1;
+    const down = phase < 0.35 ? phase / 0.35 : (phase < 0.6 ? 1 : 1 - (phase - 0.6) / 0.4);
+    stamper.position.y = 1.05 - down * 0.17;
+    armDown(-0.75 - down * 0.35);
+    if (cyc >= 3) {
+      stamper.position.y = 1.05;
+      stampTimer = 0; stampState = 'putback';
+    }
+    return;
+  }
+
+  if (stampState === 'putback') {
+    // 把盖好章的箱子放回皮带（0.6s），箱子在工人手上消失 = 交回滚筒线
+    const t = Math.min(stampTimer / 0.6, 1);
+    armDown(-1.0 * (1 - t));
+    // 箱子往西移向皮带（工人面朝东，皮带在其西侧）
+    if (stampBin) stampBin.position.x = -t * 0.55;
+    if (t >= 1) {
+      if (stampBin) { qcPackWorker.remove(stampBin); stampBin = null; }
+      stampedCount++;
+      stampTimer = 0; stampState = 'idle';
+      armDown(0);
+    }
+    return;
+  }
 }
 
+// ===== 打包工人（线尾）=====
+// 动作循环：线尾取箱 -> 打包台装箱 -> 走到栈板放箱 -> 回线尾
+// 满 27 箱后转 towing：拉着栈板走到发货区，卸手回来。
+let packState = 'wait';    // wait / to_line / pick / to_table / packing / to_pallet / place / back / tow_out / tow_back
+let packTimer = 0;
+let packCarry = null;      // 手上的成品箱
+const PACK_TABLE_POS = new THREE.Vector3(PACK_X - 1.1, 0, PACK_Z - 0.2);
+
+function moveWorkerTo(mesh, target, dt, speed = 1.15) {
+  const dx = target.x - mesh.position.x;
+  const dz = target.z - mesh.position.z;
+  const d = Math.hypot(dx, dz);
+  const ud = mesh.userData;
+  if (d < 0.06) {
+    if (ud.legL) ud.legL.rotation.x = 0;
+    if (ud.legR) ud.legR.rotation.x = 0;
+    return true;
+  }
+  mesh.position.x += (dx / d) * speed * dt;
+  mesh.position.z += (dz / d) * speed * dt;
+  mesh.rotation.y = Math.atan2(dx, dz);
+  if (ud.legL) ud.legL.rotation.x = Math.sin(performance.now() * 0.009) * 0.32;
+  if (ud.legR) ud.legR.rotation.x = -Math.sin(performance.now() * 0.009) * 0.32;
+  return false;
+}
+
+function updatePackWorker(dt) {
+  const ud = packWorker.userData;
+  const arms = (v) => { if (ud.armL) ud.armL.rotation.x = v; if (ud.armR) ud.armR.rotation.x = v; };
+  packTimer += dt;
+
+  switch (packState) {
+    case 'wait':
+      arms(Math.sin(performance.now() * 0.0022) * 0.1);
+      // 垛满了先去送货，否则继续装箱
+      if (palletState === 'towing') { packState = 'tow_out'; packTimer = 0; break; }
+      if (packTimer > 1.2) { packState = 'to_line'; packTimer = 0; }
+      break;
+
+    case 'to_line':
+      // 走到线尾取箱位
+      if (moveWorkerTo(packWorker, new THREE.Vector3(PACK_LINE_END.x + 0.15, 0, PACK_LINE_END.z + 0.75), dt)) {
+        packWorker.rotation.y = Math.PI;
+        packState = 'pick'; packTimer = 0;
+      }
+      break;
+
+    case 'pick': {
+      // 弯腰从滚筒线拿下成品箱（箱子在手上出现）
+      const t = Math.min(packTimer / 0.7, 1);
+      arms(-1.05 * t);
+      if (!packCarry && t > 0.45) {
+        packCarry = box(0.3, 0.26, 0.3, P.carton, { rough: 0.8 });
+        packCarry.position.set(0, 0.92, 0.28);
+        packWorker.add(packCarry);
+      }
+      if (t >= 1) { arms(0); packState = 'to_table'; packTimer = 0; }
+      break;
+    }
+
+    case 'to_table':
+      if (moveWorkerTo(packWorker, PACK_TABLE_POS, dt)) {
+        packWorker.rotation.y = Math.PI / 2;   // 面朝打包台
+        packState = 'packing'; packTimer = 0;
+      }
+      break;
+
+    case 'packing': {
+      // 装箱/封箱：双臂上下往复 2 个来回
+      const s = Math.sin(packTimer * 5.5);
+      arms(-0.55 + s * 0.3);
+      if (packCarry) packCarry.position.y = 0.92 - 0.06 + Math.abs(s) * 0.05;
+      if (packTimer > 2.4) {
+        arms(0);
+        packState = 'to_pallet'; packTimer = 0;
+      }
+      break;
+    }
+
+    case 'to_pallet': {
+      // 走到栈板旁（站在栈板南侧）
+      const stand = new THREE.Vector3(palletHome.x, 0, palletHome.z - 1.05);
+      if (moveWorkerTo(packWorker, stand, dt)) {
+        packWorker.rotation.y = 0;             // 面朝栈板(+Z)
+        packState = 'place'; packTimer = 0;
+      }
+      break;
+    }
+
+    case 'place': {
+      // 弯腰把箱子放到垛上：箱子在手上消失，栈板上出现一箱（真实交接）
+      const t = Math.min(packTimer / 0.8, 1);
+      arms(-0.95 * t);
+      if (packCarry) packCarry.position.y = 0.92 - t * 0.35;
+      if (t >= 1) {
+        if (packCarry) { packWorker.remove(packCarry); packCarry = null; }
+        stackOneCarton();
+        arms(0);
+        packState = 'back'; packTimer = 0;
+      }
+      break;
+    }
+
+    case 'back':
+      if (moveWorkerTo(packWorker, PACKW_HOME, dt)) {
+        packWorker.rotation.y = Math.PI;
+        packState = 'wait'; packTimer = 0;
+      }
+      break;
+
+    case 'tow_out': {
+      // 拉栈板去发货区：工人走在栈板前面 1.1m，栈板由 updatePallet 贴着走
+      // 0.042/s：贝塞尔路径约 26m，折合 24s 走完，约 1.1m/s，
+      // 与「人拉栈板车」的实际步速相当。调快会看起来像在飘。
+      palletTowProgress = Math.min(1, palletTowProgress + dt * 0.042);
+      const t = palletTowProgress;
+      const lead = palletTowPoint(Math.min(1, t + 0.055));
+      const dx = lead.x - packWorker.position.x, dz = lead.z - packWorker.position.z;
+      if (Math.hypot(dx, dz) > 1e-4) packWorker.rotation.y = Math.atan2(dx, dz);
+      packWorker.position.set(lead.x, 0, lead.z);
+      // 拉车姿态：双臂后伸
+      arms(-0.5);
+      if (ud.legL) ud.legL.rotation.x = Math.sin(performance.now() * 0.011) * 0.35;
+      if (ud.legR) ud.legR.rotation.x = -Math.sin(performance.now() * 0.011) * 0.35;
+      if (t >= 1) {
+        shippedPallets++;
+        palletState = 'resetting';
+        palletTimer = 0;
+        arms(0);
+        packState = 'tow_back'; packTimer = 0;
+      }
+      break;
+    }
+
+    case 'tow_back':
+      // 空手走回打包区
+      if (moveWorkerTo(packWorker, PACKW_HOME, dt, 1.35)) {
+        packWorker.rotation.y = Math.PI;
+        packState = 'wait'; packTimer = 0;
+      }
+      break;
+  }
+}
+
+function updatePackWorkers(dt) {
+  updateStampWorker(dt);
+  updatePackWorker(dt);
+}
+
+// ===== QC 检测员：巡检样品盖章判定 =====
+// 动作循环：等样 -> 取样 -> 检测（低头看仪器）-> 盖章判定 -> 归档
+let qcAnimState = 'idle';
+let qcAnimTimer = 0;
 function updateQCWorker(dt) {
   const ud = qcWorker.userData;
-  if (ud.armL) ud.armL.rotation.x = Math.sin(performance.now() * 0.002) * 0.15;
+  const arms = (v) => { if (ud.armL) ud.armL.rotation.x = v; if (ud.armR) ud.armR.rotation.x = v; };
+  qcAnimTimer += dt;
+
+  switch (qcAnimState) {
+    case 'idle':
+      arms(Math.sin(performance.now() * 0.002) * 0.1);
+      if (qcAnimTimer > 1.8) { qcAnimState = 'inspect'; qcAnimTimer = 0; }
+      break;
+    case 'inspect': {
+      // 双手在仪器上操作
+      const s = Math.sin(qcAnimTimer * 4.5);
+      if (ud.armL) ud.armL.rotation.x = -0.85 + s * 0.18;
+      if (ud.armR) ud.armR.rotation.x = -0.85 - s * 0.18;
+      if (qcAnimTimer > 2.6) { qcAnimState = 'stamp'; qcAnimTimer = 0; }
+      break;
+    }
+    case 'stamp': {
+      // 盖章判定：右手下压 2 次，同时台上的判定章跟着动
+      const cyc = qcAnimTimer / 0.6;
+      const phase = cyc % 1;
+      const down = phase < 0.35 ? phase / 0.35 : (phase < 0.6 ? 1 : 1 - (phase - 0.6) / 0.4);
+      if (ud.armR) ud.armR.rotation.x = -0.7 - down * 0.5;
+      if (ud.armL) ud.armL.rotation.x = -0.35;
+      qcStamp.position.y = QC_STAMP_Y - down * 0.14;
+      if (cyc >= 2) {
+        qcStamp.position.y = QC_STAMP_Y;
+        arms(0);
+        qcAnimState = 'idle'; qcAnimTimer = 0;
+      }
+      break;
+    }
+  }
 }
 
 // ===== 安灯闪烁 =====
@@ -1510,10 +1833,15 @@ function updateUI(dt) {
 
 
 // ===== 厂房外墙 & 整体环境 =====
+// 墙必须包住整块地坪，否则会出现「地面伸到墙外」的悬空边。
+// 做法：墙中心线放在地坪边缘 + 半个墙厚处，内墙面正好与地坪边缘齐平。
 const WALL_H = 4.5;
 const WALL_THICK = 0.3;
-const FACTORY_W = 38;
-const FACTORY_D = 30;
+const FACTORY_W = FLOOR_W;          // 内净宽 = 地坪宽
+const FACTORY_D = FLOOR_D;          // 内净深 = 地坪深
+const WALL_CX = FACTORY_W / 2 + WALL_THICK / 2;   // 东西墙中心 x
+const WALL_CZ = FACTORY_D / 2 + WALL_THICK / 2;   // 南北墙中心 z
+const WALL_SPAN_W = FACTORY_W + WALL_THICK * 2;   // 南北墙长度（含拐角搭接）
 const wallColor = 0xf5efd8;
 const windowColor = 0xb8d4e8;
 
@@ -1523,11 +1851,11 @@ function addFactoryWall(x, z, w, d) {
   scene.add(m);
 }
 
-// 四面墙
-addFactoryWall(0, FACTORY_D / 2, FACTORY_W, WALL_THICK);
-addFactoryWall(0, -FACTORY_D / 2, FACTORY_W, WALL_THICK);
-addFactoryWall(-FACTORY_W / 2, 0, WALL_THICK, FACTORY_D);
-addFactoryWall(FACTORY_W / 2, 0, WALL_THICK, FACTORY_D);
+// 四面墙（南北墙拉长到含拐角，东西墙夹在中间，四角无缝）
+addFactoryWall(0,  WALL_CZ, WALL_SPAN_W, WALL_THICK);
+addFactoryWall(0, -WALL_CZ, WALL_SPAN_W, WALL_THICK);
+addFactoryWall(-WALL_CX, 0, WALL_THICK, FACTORY_D);
+addFactoryWall( WALL_CX, 0, WALL_THICK, FACTORY_D);
 
 // 窗户（南北两排）
 function addWindow(x, z, rotY) {
@@ -1545,40 +1873,48 @@ function addWindow(x, z, rotY) {
   mullion.rotation.y = rotY;
   scene.add(mullion);
 }
-for (let i = 0; i < 9; i++) {
-  const wx = -FACTORY_W / 2 + 3 + i * 3.8;
-  addWindow(wx, FACTORY_D / 2 + 0.01, 0);
-  addWindow(wx, -FACTORY_D / 2 - 0.01, 0);
+// 窗按墙长均分，避免写死数量后墙变长而右侧留一片空白
+{
+  const winN = Math.max(2, Math.floor((FACTORY_W - 4) / 4));
+  const winStep = (FACTORY_W - 4) / (winN - 1);
+  for (let i = 0; i < winN; i++) {
+    const wx = -FACTORY_W / 2 + 2 + i * winStep;
+    addWindow(wx,  WALL_CZ, 0);
+    addWindow(wx, -WALL_CZ, 0);
+  }
 }
 
 // 西侧大门（物流入口）
 {
   const gate = box(4.5, 3.8, WALL_THICK + 0.05, 0x5a4a2a, { metal: 0.4, rough: 0.6 });
-  gate.position.set(-FACTORY_W / 2 + 0.02, 1.9, -9);
+  gate.rotation.y = Math.PI / 2;
+  gate.position.set(-WALL_CX, 1.9, -9);
   scene.add(gate);
   // 门柱
-  const p1 = box(0.3, 4.0, 0.4, 0x8a7d4a);
-  p1.position.set(-FACTORY_W / 2 - 0.1, 2.0, -11.3); scene.add(p1);
-  const p2 = box(0.3, 4.0, 0.4, 0x8a7d4a);
-  p2.position.set(-FACTORY_W / 2 - 0.1, 2.0, -6.7); scene.add(p2);
+  const p1 = box(0.4, 4.0, 0.3, 0x8a7d4a);
+  p1.position.set(-WALL_CX, 2.0, -11.3); scene.add(p1);
+  const p2 = box(0.4, 4.0, 0.3, 0x8a7d4a);
+  p2.position.set(-WALL_CX, 2.0, -6.7); scene.add(p2);
   // 门楣标识
   const sign = box(3, 0.7, WALL_THICK + 0.1, 0xcc5500, { emissive: 0xcc5500, emissiveIntensity: 0.3 });
-  sign.position.set(-FACTORY_W / 2 + 0.03, 4.2, -9);
+  sign.rotation.y = Math.PI / 2;
+  sign.position.set(-WALL_CX, 4.2, -9);
   scene.add(sign);
 }
 
 // 东侧人员入口
 {
   const door = box(2, 3, WALL_THICK + 0.03, 0x6a5a3a, { metal: 0.3, rough: 0.6 });
-  door.position.set(FACTORY_W / 2 - 0.02, 1.5, 5);
+  door.rotation.y = Math.PI / 2;
+  door.position.set(WALL_CX, 1.5, 5);
   scene.add(door);
 }
 
 
-// 厂房内地面（加深一点，突出厂房范围）
+// 厂房内地面（加深一点，突出厂房范围）。与地坪同尺寸，铺满到墙脚。
 {
-  const inner = floorTile(FACTORY_W - 1, FACTORY_D - 1, 0xd0c8a4);
-  inner.position.set(0, 0.011, 0);
+  const inner = floorTile(FACTORY_W, FACTORY_D, 0xd0c8a4);
+  inner.position.set(0, 0.0105, 0);
   scene.add(inner);
 }
 
@@ -1594,12 +1930,13 @@ function addPlant(x, z, sc = 1) {
   g.position.set(x, 0, z);
   scene.add(g);
 }
-addPlant(15, 12);
-addPlant(-16, 11);
-addPlant(15, -10);
-addPlant(-16, -12);
-addPlant(10, 13.5);
-addPlant(-10, 13.5);
+// 绿化摆在墙角空地，避开出货区(x -18.5..-11.5, z 9.5..14.5)与物料超市
+addPlant(19, 15.5);
+addPlant(-19.5, 15.5);
+addPlant(19.5, -15.5);
+addPlant(-19.5, -15.5);
+addPlant(19.5, 2);
+addPlant(-19.5, 3);
 // ===== 精益物流补充元素 =====
 
 // --- 物料超市（东北角） ---
@@ -1672,8 +2009,9 @@ function addWalkway(x, z, w, d) {
   m.position.set(x, 0.018, z);
   scene.add(m);
 }
-addWalkway(5.5, 0, 1.2, 8);
-addWalkway(0, -5.2, 8, 1.2);
+// 人行通道。南侧那条要让开 PACK INPUT 货位（x 1.7..3.9），否则标线压在货架下面。
+addWalkway(-5.5, 0, 1.2, 8);
+addWalkway(-2.2, -5.2, 3.6, 1.2);
 addWalkway(0, 5.2, 8, 1.2);
 
 // --- 中央目视化看板（车间实体悬挂屏） ---
@@ -1911,7 +2249,7 @@ window.__stopCheck = () => {
     pts.push(['zone' + i + '-product', zoneStops[i].productStop]);
   }
   pts.push(['qcInput', qcInputStop], ['qcOutput', qcOutputStop]);
-  pts.push(['packInput', packInputStop], ['packOutput', packOutputStop]);
+  pts.push(['packInput', packInputStop]);   // 打包区无 OUTPUT
   pts.push(['charge0', chargeStops[0]], ['charge1', chargeStops[1]]);
   const rows = pts.map(([n, p]) => {
     const arc = arcOfPoint(p);
@@ -1964,4 +2302,53 @@ window.__amrGap = () => {
 window.__qcInject = (n = 5) => {
   for (let i = 0; i < n; i++) { qcInspected++; pushQcRecord(); }
   return { records: qcRecords.length, qcInspected, qcNgCount };
+};
+
+// 打包区流程自检：盖章/打包/码垛/拖运各自的状态机是否在推进
+window.__packProbe = () => {
+  const info = {
+    stampState, stampedCount, stampHasBin: !!stampBin,
+    packState, packHasCarry: !!packCarry,
+    palletState, palletCount, palletTowProgress: +palletTowProgress.toFixed(2),
+    shippedPallets,
+    packWorkerPos: [+packWorker.position.x.toFixed(2), +packWorker.position.z.toFixed(2)],
+    palletPos: [+palletGroup.position.x.toFixed(2), +palletGroup.position.z.toFixed(2)],
+    qcAnimState,
+  };
+  console.log(info);
+  return info;
+};
+
+// 跳到「差 n 箱满垛」，用来验证满垛后工人拖栈板去发货区（否则要等 270s 仿真时间）
+window.__forcePallet = (remain = 1) => {
+  if (palletState !== 'building') return 'not building: ' + palletState;
+  const target = Math.max(0, 27 - remain);
+  while (palletCount < target) {
+    const b = palletBoxes[palletCount];
+    palletCount++;
+    if (b) { b.visible = true; b.position.y = 0.15 + Math.floor((palletCount - 1) / 9) * 0.3; }
+  }
+  return { palletCount, palletState };
+};
+
+// 场地包围检查：所有可见物体必须落在四面墙内
+window.__boundsProbe = () => {
+  const lim = { x: FACTORY_W / 2, z: FACTORY_D / 2 };
+  const bb = new THREE.Box3();
+  const out = [];
+  scene.traverse(o => {
+    if (!o.isMesh || !o.visible) return;
+    bb.setFromObject(o);
+    if (!isFinite(bb.min.x)) return;
+    // 墙体本身允许压在边界上
+    if (Math.abs(bb.min.y) > 100) return;
+    const ox = Math.max(-lim.x - bb.min.x, bb.max.x - lim.x);
+    const oz = Math.max(-lim.z - bb.min.z, bb.max.z - lim.z);
+    if (ox > 0.45 || oz > 0.45) {
+      out.push({ name: o.name || 'mesh', ox: +ox.toFixed(2), oz: +oz.toFixed(2),
+                 pos: [+o.position.x.toFixed(1), +o.position.z.toFixed(1)] });
+    }
+  });
+  console.log('floor', FACTORY_W + 'x' + FACTORY_D, 'outside:', out.length);
+  return { floor: [FACTORY_W, FACTORY_D], outsideCount: out.length, outside: out.slice(0, 12) };
 };
